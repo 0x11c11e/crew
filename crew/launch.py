@@ -1,10 +1,14 @@
-"""Bring a project's crew up in tmux (Claude Code left, dashboard right), or stop it.
+"""Bring a project's crew up in tmux, or stop it.
+
+wide:  Claude Code left, the dashboard right (and an optional raw worker log).
+strip: Claude Code left, a narrow status strip in the middle, the worker's own interactive Codex right.
 
 All crew sessions live on one dedicated tmux server (`tmux -L crew`), so they never touch your
-own tmux sessions. Each project gets its own session, `crew-<name>`.
+own tmux sessions. Each project gets its own session, `crew-<name>-<hash of its path>`.
 """
 from __future__ import annotations
 
+import hashlib
 import re
 import shlex
 import shutil
@@ -14,7 +18,7 @@ import time
 from dataclasses import dataclass
 from pathlib import Path
 
-from . import protocol
+from . import attached, protocol
 from .bus import Bus, unique
 from .config import Config, ensure_state
 
@@ -32,22 +36,58 @@ set -g status-style "bg=#1F1B2E,fg=#C084FC"
 set -g status-left-length 40
 set -g status-right-length 80
 set -g status-left " crew "
-set -g status-right " Ctrl-b d detaches · crew stop closes "
+set -g status-right " crew · Ctrl-b d detaches · crew stop closes "
+set -g pane-border-status top
+set -g pane-border-format " #{{pane_title}} "
+set -g allow-set-title off
 set -g pane-border-style "fg=#3B3650"
 set -g pane-active-border-style "fg=#C084FC"
 """
 
 
+def tmux_literal(s: str, strftime: bool = True) -> str:
+    """Text that tmux shows as-is: no #{formats} or #(commands), and with strftime (status lines
+    pass through it, pane titles do not) no %-sequences either."""
+    s = re.sub(r"[\x00-\x1f\x7f]+", " ", s).replace("#", "##")
+    return s.replace("%", "%%") if strftime else s
+
+
+def status_left(cfg: Config) -> str:
+    return f" crew · {tmux_literal(cfg.name)} "
+
+
+def trio(cfg: Config):
+    """The worker for the right pane when the layout is strip, else None. Only a Codex worker can be
+    attached today, so a project whose first worker is Claude keeps the wide layout."""
+    if cfg.layout == "strip" and cfg.workers and cfg.workers[0].kind == "codex":
+        return cfg.workers[0]
+    return None
+
+
+def pane_titles(cfg: Config) -> tuple[str, ...]:
+    """Border labels for the panes in order, escaped for select-pane -T: architect, dashboard, raw log;
+    or with the strip layout architect, status, worker."""
+    arch = "architect · Claude Code" + (f" · {cfg.architect.model}" if cfg.architect.model else "")
+    w = trio(cfg)
+    titles = (arch, "status", f"worker · Codex · {w.model or 'default'}") if w else \
+        (arch, "dashboard · q quits, 1-9 focus an agent", "raw worker log")
+    return tuple(tmux_literal(t, strftime=False) for t in titles)
+
+
 def session_name(cfg: Config) -> str:
-    """tmux session names cannot contain '.' or ':'."""
-    return "crew-" + (re.sub(r"[^A-Za-z0-9_-]+", "-", cfg.name).strip("-") or "project")
+    """crew-<name>-<hash of the project path>: two clones with one name, or names that differ only
+    in characters tmux refuses ('.' and ':'), still get sessions of their own."""
+    base = re.sub(r"[^A-Za-z0-9_-]+", "-", cfg.name).strip("-") or "project"
+    digest = hashlib.sha1(str(Path(cfg.root).resolve()).encode()).hexdigest()[:6]
+    return f"crew-{base}-{digest}"
 
 
 @dataclass
 class Panes:
     architect: str          # the shell command for the left pane
-    dashboard: str          # the right pane
+    dashboard: str          # the right pane (the middle one with the strip layout)
     raw: str | None         # optional bottom-right pane
+    worker: str | None = None   # strip layout: the worker's interactive agent, right
 
 
 def pane_commands(cfg: Config, claude_args: str = "", python: str | None = None) -> Panes:
@@ -60,10 +100,14 @@ def pane_commands(cfg: Config, claude_args: str = "", python: str | None = None)
         claude += ["--model", cfg.architect.model]
     claude_cmd = " ".join(q(c) for c in claude) + (f" {claude_args.strip()}" if claude_args.strip() else "")
     # Prepend, never replace: $PATH is expanded by the pane's shell, not here.
-    architect = (f"cd {root} && PATH={q(str(BIN))}:\"$PATH\" CREW_PROJECT={root} CREW_PYTHON={q(py)} {claude_cmd}")
+    prefix = f"cd {root} && PATH={q(str(BIN))}:\"$PATH\" CREW_PROJECT={root} CREW_PYTHON={q(py)}"
+    architect = f"{prefix} {claude_cmd}"
+    w = trio(cfg)
     dashboard = (f"cd {root} && PYTHONPATH={q(str(REPO))} COLORTERM=truecolor "
-                 f"{q(py)} -m crew dashboard --project {root}"
+                 f"{q(py)} -m crew dashboard --project {root} --layout {'strip' if w else 'wide'}"
                  f" || {{ echo; read -r -p 'dashboard exited with an error, press Enter'; }}")
+    if w:
+        return Panes(architect, dashboard, None, attached.pane_shell(cfg, w, prefix))
     raw = None
     if cfg.dashboard.raw:
         raw = (f"cd {root} && cur=; pid=; while true; do "
@@ -119,6 +163,11 @@ def print_plan(cfg: Config, panes: Panes, out=None) -> None:
     w(f"project   {cfg.root}\n")
     w(f"session   tmux -L {SOCKET} attach -t {session_name(cfg)}\n")
     w(f"\n# terminal 1 (left): the architect, Claude Code\n{panes.architect}\n")
+    if panes.worker:
+        w(f"\n# terminal 2 (middle, 44+ columns): the status strip\n{panes.dashboard}\n")
+        w(f"\n# terminal 3 (right): the worker, interactive Codex"
+          f" (from a hand-opened Codex instead: crew attach {cfg.workers[0].name})\n{panes.worker}\n")
+        return
     w(f"\n# terminal 2 (right, {cfg.dashboard.split}% wide): the dashboard\n{panes.dashboard}\n")
     if panes.raw:
         w(f"\n# terminal 3 (optional): newest raw worker log\n{panes.raw}\n")
@@ -126,6 +175,8 @@ def print_plan(cfg: Config, panes: Panes, out=None) -> None:
 
 def up(cfg: Config, fresh: bool = False, detached: bool = False, claude_args: str = "",
        dry_run: bool = False) -> int:
+    if cfg.layout == "strip" and not trio(cfg):
+        print("layout strip needs a codex worker on the right; using wide")
     panes = pane_commands(cfg, claude_args)
     md, st = prepare(cfg)
     if dry_run:
@@ -150,11 +201,23 @@ def up(cfg: Config, fresh: bool = False, detached: bool = False, claude_args: st
     tmux("source-file", str(conf), check=False, capture=True)          # if the server already runs
     tmux("new-session", "-d", "-s", name, "-n", "main", "-x", "220", "-y", "50", "-c", str(cfg.root),
          "-e", "COLORTERM=truecolor", in_bash(panes.architect), conf=conf)
-    tmux("split-window", "-h", "-t", f"={name}:main", "-l", f"{cfg.dashboard.split}%", "-c", str(cfg.root),
-         in_bash(panes.dashboard))
+    if panes.worker:
+        # architect 40% | status 22% (48 columns of the first 220) | worker the rest
+        tmux("split-window", "-h", "-t", f"={name}:main.0", "-l", "60%", "-c", str(cfg.root),
+             in_bash(panes.dashboard))
+        r = tmux("split-window", "-h", "-t", f"={name}:main.1", "-l", "63%", "-c", str(cfg.root), "-P", "-F",
+                 "#{pane_id}", in_bash(panes.worker), capture=True)
+        pane_id = (getattr(r, "stdout", "") or "").strip() or f"={name}:main.2"
+        attached.write_pane(cfg, cfg.workers[0].name, pane_id)
+    else:
+        tmux("split-window", "-h", "-t", f"={name}:main", "-l", f"{cfg.dashboard.split}%", "-c", str(cfg.root),
+             in_bash(panes.dashboard))
     if panes.raw:
         tmux("split-window", "-v", "-t", f"={name}:main.1", "-l", "30%", "-c", str(cfg.root), in_bash(panes.raw))
-    tmux("set-option", "-t", f"={name}:", "status-left", f" crew · {cfg.name} ", check=False, capture=True)
+    tmux("set-option", "-t", f"={name}:", "status-left", status_left(cfg), check=False, capture=True)
+    titles = pane_titles(cfg)
+    for i in range(3 if panes.raw or panes.worker else 2):
+        tmux("select-pane", "-t", f"={name}:main.{i}", "-T", titles[i], check=False, capture=True)
     tmux("select-pane", "-t", f"={name}:main.0")
     return attach(name, detached)
 

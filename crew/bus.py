@@ -23,6 +23,8 @@ import time
 import uuid
 from pathlib import Path
 
+from .config import ensure_state
+
 MAX_TEXT = 1500    # longest text field stored (a whole task brief fits)
 MAX_LINE = 8000    # keep each line short so a single append never interleaves with another writer
 KINDS = ("connect", "prompt", "task", "message", "exec", "exec_done", "edit", "read", "thinking",
@@ -52,7 +54,7 @@ def encode(src: str, dst: str | None = None, kind: str = "message", text: str = 
 def append_line(path: Path, line: str) -> None:
     """One os.write with O_APPEND: safe with many writers at once."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o600)
     try:
         os.write(fd, (line + "\n").encode("utf-8"))
     finally:
@@ -67,23 +69,31 @@ class Bus:
         self.dir = self.project / ".crew"
         self.events = self.dir / "events.jsonl"
         self.archive = self.dir / "archive"
+        self._ready = False
+
+    def _ensure(self) -> None:
+        """Before the first write: .crew/ with its self-ignore, whichever command writes first."""
+        if not self._ready:
+            ensure_state(self.project)
+            self._ready = True
 
     def post(self, src: str, dst: str | None = None, kind: str = "message", text: str = "", /, **data) -> dict:
         """Append one event. Safe to call from many processes at once."""
         ev, line = encode(src, dst, kind, text, **data)
+        self._ensure()
         append_line(self.events, line)
         return ev
 
     def reset(self) -> Path | None:
         """Archive the current log under .crew/archive and start an empty one."""
-        self.dir.mkdir(parents=True, exist_ok=True)
+        self._ensure()
         if not self.events.exists() or self.events.stat().st_size == 0:
-            self.events.touch()
+            self.events.touch(0o600)
             return None
         self.archive.mkdir(exist_ok=True)
         dest = unique(self.archive / time.strftime("events-%Y%m%d-%H%M%S.jsonl"))
         self.events.rename(dest)
-        self.events.touch()
+        self.events.touch(0o600)
         return dest
 
     def read(self) -> list[dict]:

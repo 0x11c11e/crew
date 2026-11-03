@@ -13,7 +13,7 @@ from .bus import Bus, Follower, fmt
 from .config import ConfigError
 
 SUBCOMMANDS = ("init", "up", "run", "say", "verify", "post", "tail", "status", "dashboard", "replay",
-               "snapshot", "hook", "stop")
+               "snapshot", "hook", "stop", "attach")
 
 
 # ----------------------------------------------------------------------------- prompts
@@ -55,11 +55,28 @@ def ask_choice(question: str, default: str, choices, yes: bool) -> str:
 
 
 def ask_int(question: str, default: int, yes: bool, lo: int = 1, hi: int = 9) -> int:
+    """Ask until the answer is in lo..hi. An out-of-range default is never retried: when the answer
+    is the default (--yes, no tty, end of input or a blank line), warn once and clamp it into range."""
     while True:
         ans = ask(question, str(default), yes)
         if ans.isdigit() and lo <= int(ans) <= hi:
             return int(ans)
+        if ans == str(default):
+            fixed = min(max(default, lo), hi)
+            print(f"  {question.lower()} must be from {lo} to {hi}; using {fixed}")
+            return fixed
         print(f"  please answer a number from {lo} to {hi}")
+
+
+def worker_count(s: str) -> int:
+    """argparse type for --workers: an integer from 1 to 9."""
+    try:
+        n = int(s)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not a number: {s!r}") from None
+    if not 1 <= n <= 9:
+        raise argparse.ArgumentTypeError(f"must be from 1 to 9, got {n}")
+    return n
 
 
 # ----------------------------------------------------------------------------- init
@@ -78,11 +95,14 @@ def do_init(root: Path, yes: bool, workers: int | None = None, kind: str | None 
         if not yes else (model or "")
     if arch_model in ("''", '""'):
         arch_model = ""
-    n = ask_int("Number of workers", workers or 2, yes)
+    n = ask_int("Number of workers", workers or 1, yes)
     k = ask_choice("Worker kind", kind or "codex", config.KINDS, yes)
+    w_model = ask("Worker model (blank = the agent's default)", worker_model or "", yes)
+    if w_model in ("''", '""'):
+        w_model = ""
     effort = ask_choice("Codex reasoning effort", "medium", config.EFFORTS, yes) if k == "codex" else "medium"
     text = config.template(name=name, architect_model=arch_model, workers=n, kind=k, effort=effort,
-                           model=worker_model or "")
+                           model=w_model)
     config.write(root, text)
     config.load(root)                         # validate what we wrote
     if show:
@@ -98,7 +118,8 @@ def bring_up(a: argparse.Namespace) -> int:
     yes = a.yes or not interactive()
     if a.dir is None:
         cwd = os.getcwd()
-        d = ask("Project directory", cwd, yes)
+        # a configured project needs no question: `crew` in it just brings it up
+        d = cwd if (Path(cwd) / config.FILENAME).is_file() else ask("Project directory", cwd, yes)
     else:
         d = a.dir
     root = Path(d).expanduser().resolve()
@@ -142,7 +163,7 @@ def parser() -> argparse.ArgumentParser:
     s = sub.add_parser("init", help="write crew.toml and .crew/ in a project")
     s.add_argument("dir", nargs="?", default=".")
     s.add_argument("--yes", "-y", action="store_true", help="accept every default")
-    s.add_argument("--workers", type=int, help="number of workers (default 2)")
+    s.add_argument("--workers", type=worker_count, help="number of workers, 1 to 9 (default 1)")
     s.add_argument("--kind", choices=config.KINDS, help="worker kind (default codex)")
     s.add_argument("--model", help="architect model (default: your Claude Code default)")
     s.add_argument("--worker-model", help="model for every worker (default: each agent's own)")
@@ -162,6 +183,9 @@ def parser() -> argparse.ArgumentParser:
     g.add_argument("--task-file", help="a markdown brief")
     s.add_argument("--continue", dest="cont", action="store_true", help="resume this worker's thread")
     s.add_argument("--timeout", type=int, help="seconds before the worker is killed (default from crew.toml)")
+    s.add_argument("--read-only", dest="readonly", action="store_true",
+                   help="this task may read but not change files (codex: read-only sandbox; "
+                        "claude: default permissions, Read Glob Grep only)")
 
     s = sub.add_parser("say", parents=[proj], help="the architect says something on the bus")
     s.add_argument("text")
@@ -187,10 +211,12 @@ def parser() -> argparse.ArgumentParser:
 
     s = sub.add_parser("dashboard", parents=[proj], help="the live dashboard")
     s.add_argument("--events", help="events file to follow (default <project>/.crew/events.jsonl)")
+    s.add_argument("--layout", choices=config.LAYOUTS, help="wide or strip (default from crew.toml)")
 
     s = sub.add_parser("replay", parents=[proj], help="play a recorded events file")
     s.add_argument("file")
     s.add_argument("--speed", type=float, default=2.0)
+    s.add_argument("--layout", choices=config.LAYOUTS, help="wide or strip (default from crew.toml)")
 
     s = sub.add_parser("snapshot", parents=[proj], help="render one dashboard frame to SVG")
     s.add_argument("out")
@@ -201,9 +227,13 @@ def parser() -> argparse.ArgumentParser:
     s.add_argument("--scroll", type=int, default=0)
     s.add_argument("--width", type=int, default=150)
     s.add_argument("--height", type=int, default=45)
+    s.add_argument("--layout", choices=config.LAYOUTS, help="wide or strip (default from crew.toml)")
 
     s = sub.add_parser("hook", help="Claude Code hook entry (reads the payload on stdin)")
     s.add_argument("event", nargs="?", default="")
+
+    s = sub.add_parser("attach", parents=[proj], help="make this tmux pane (an interactive Codex) a worker")
+    s.add_argument("name")
 
     s = sub.add_parser("stop", help="close a project's tmux session")
     s.add_argument("dir", nargs="?")
@@ -244,7 +274,7 @@ def dispatch(a: argparse.Namespace) -> int:
         from . import worker
         cfg = project_cfg(a.project)
         task = Path(a.task_file).read_text() if a.task_file else a.task
-        return worker.run(cfg, a.name, task, cont=a.cont, timeout=a.timeout)
+        return worker.run(cfg, a.name, task, cont=a.cont, timeout=a.timeout, readonly=a.readonly)
     if c == "say":
         cfg = project_cfg(a.project)
         me = cfg.architect.name
@@ -295,14 +325,14 @@ def dispatch(a: argparse.Namespace) -> int:
         if cfg:
             dashboard.configure(cfg)
         events = a.events or str(Bus(cfg.root).events)
-        return dashboard.run(events=events)
+        return dashboard.run(events=events, layout=a.layout)
     if c == "replay":
         from . import dashboard
         if not Path(a.file).is_file():
             raise ConfigError(f"no such file: {a.file}")
         if a.project:
             dashboard.configure(project_cfg(a.project))
-        return dashboard.run(replay=a.file, speed=a.speed)
+        return dashboard.run(replay=a.file, speed=a.speed, layout=a.layout)
     if c == "snapshot":
         from . import dashboard
         if a.replay or a.events:
@@ -315,8 +345,11 @@ def dispatch(a: argparse.Namespace) -> int:
             raise ConfigError(f"no such file: {path}")
         if cfg:
             dashboard.configure(cfg)
-        dashboard.snapshot(path, a.out, a.width, a.height, a.focus, a.scroll)
+        dashboard.snapshot(path, a.out, a.width, a.height, a.focus, a.scroll, layout=a.layout)
         return 0
+    if c == "attach":
+        from . import attached
+        return attached.attach(project_cfg(a.project), a.name)
     if c == "hook":
         from . import hook
         return hook.main([a.event] if a.event else [])
@@ -325,6 +358,9 @@ def dispatch(a: argparse.Namespace) -> int:
 
 def main(argv=None) -> int:
     argv = sys.argv[1:] if argv is None else list(argv)
+    if argv[:1] == ["codex-notify"]:            # Codex's notify hook; not in --help, never fails
+        from . import attached
+        return attached.notify(argv[1:])
     try:
         if argv and (argv[0] in SUBCOMMANDS or argv[0] in ("-h", "--help", "-V", "--version")):
             return dispatch(parser().parse_args(argv))

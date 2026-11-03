@@ -8,6 +8,7 @@ taken from the payload's hook_event_name, with argv[1] as a fallback.
 """
 import json
 import os
+import re
 import sys
 from pathlib import Path
 
@@ -19,6 +20,20 @@ if __package__ in (None, ""):
     sys.path.insert(0, _repo)
 
 SELF_NOISE = ("crew ",)          # `crew run/say/verify/...` post their own, nicer events
+NOTIFICATION = re.compile(r"^\s*<([a-z][a-z0-9-]*notification)>(.*)</\1>\s*$", re.S)   # Claude Code waking the architect
+SUMMARY = re.compile(r"<summary>(.*?)</summary>", re.S)
+
+
+def wake_up(prompt: str) -> str | None:
+    """Claude Code wakes the architect with a `<task-notification>` typed as if the user had spoken.
+
+    Returns the one-line summary of such a prompt, or None for a real prompt from the user."""
+    m = NOTIFICATION.match(prompt or "")
+    if not m:
+        return None
+    s = SUMMARY.search(m[2])
+    summary = " ".join((s[1] if s else m[1]).split())
+    return summary or m[1]
 
 
 def _walk_up(start: Path) -> Path | None:
@@ -60,6 +75,34 @@ def is_self(cmd: str) -> bool:
     return any(n in cmd for n in SELF_NOISE)
 
 
+def model_of(payload: dict) -> str | None:
+    """The model the architect is really running on: Claude Code does not say, but its transcript does.
+
+    Reads the tail of transcript_path and takes the model of the last assistant turn."""
+    path = payload.get("transcript_path")
+    if not path:
+        return None
+    try:
+        with open(path, "rb") as fh:
+            fh.seek(0, os.SEEK_END)
+            fh.seek(max(0, fh.tell() - 400_000))
+            lines = fh.read().decode("utf-8", "replace").splitlines()
+    except OSError:
+        return None
+    for line in reversed(lines):
+        if '"assistant"' not in line:
+            continue
+        try:
+            e = json.loads(line)
+        except ValueError:
+            continue
+        if isinstance(e, dict) and e.get("type") == "assistant":
+            model = (e.get("message") or {}).get("model")
+            if isinstance(model, str) and model:
+                return model
+    return None
+
+
 def handle(payload: dict, fallback: str = "") -> None:
     root = find_root(payload)
     if root is None:
@@ -72,9 +115,13 @@ def handle(payload: dict, fallback: str = "") -> None:
     tool = d.get("tool_name") or ""
     ti = d.get("tool_input") or {}
     if event == "SessionStart":
-        bus.post(me, None, "connect", f"{me} online · architect (Claude Code)")
+        bus.post(me, None, "connect", f"{me} online · architect (Claude Code)", model=model_of(d))
     elif event == "UserPromptSubmit":
-        bus.post("user", me, "prompt", d.get("prompt") or "")
+        summary = wake_up(d.get("prompt") or "")
+        if summary is None:
+            bus.post("user", me, "prompt", d.get("prompt") or "")
+        else:                                   # not the user: a background worker finished
+            bus.post(me, None, "status", f"woken up: {summary}")
     elif event == "PreToolUse":
         if tool == "Bash":
             cmd = ti.get("command") or ""
@@ -103,7 +150,7 @@ def handle(payload: dict, fallback: str = "") -> None:
         last = (d.get("last_assistant_message") or "").strip()
         if last:
             bus.post(me, "user", "message", last)
-        bus.post(me, "user", "status", "waiting for you")
+        bus.post(me, "user", "status", "waiting for you", model=model_of(d))
 
 
 def main(argv=None) -> int:

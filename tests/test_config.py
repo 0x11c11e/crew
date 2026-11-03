@@ -1,4 +1,5 @@
 import os
+import tempfile
 import unittest
 from pathlib import Path
 
@@ -159,6 +160,24 @@ class FindProject(unittest.TestCase):
                 self.assertEqual(config.resolve_project(str(other)), other)
             finally:
                 del os.environ["CREW_PROJECT"]
+
+
+
+class Layout(unittest.TestCase):
+    def test_default_follows_the_worker_count(self):
+        with tempfile.TemporaryDirectory() as td:
+            one = config.from_dict({"workers": [{"name": "w"}]}, Path(td))
+            two = config.from_dict({"workers": [{"name": "a"}, {"name": "b"}]}, Path(td))
+            self.assertEqual((one.layout, two.layout), ("strip", "wide"))
+            wide = config.from_dict({"workers": [{"name": "w"}], "dashboard": {"layout": "wide"}}, Path(td))
+            self.assertEqual(wide.layout, "wide")
+            with self.assertRaises(config.ConfigError):
+                config.from_dict({"dashboard": {"layout": "tall"}}, Path(td))
+
+    def test_template_writes_it(self):
+        self.assertIn('layout = "strip"', config.template("p", workers=1))
+        self.assertIn('layout = "wide"', config.template("p", workers=2))
+        self.assertIn("wide | strip", config.template("p"))
 
 
 if __name__ == "__main__":

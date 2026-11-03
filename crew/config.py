@@ -17,6 +17,7 @@ STATE_DIR = ".crew"
 KINDS = ("codex", "claude")
 SANDBOXES = ("read-only", "workspace-write", "danger-full-access")
 EFFORTS = ("minimal", "low", "medium", "high", "xhigh")
+LAYOUTS = ("wide", "strip")
 DEFAULT_ALLOWED = "Bash Edit Write MultiEdit Read Glob Grep"
 
 
@@ -40,6 +41,7 @@ class Worker:
     sandbox: str = "workspace-write"
     permission_mode: str = "acceptEdits"
     allowed_tools: str = DEFAULT_ALLOWED
+    disallowed_tools: str = ""
     cwd: str = "."
     timeout: int = 900
 
@@ -55,6 +57,7 @@ class Worker:
 class Dashboard:
     split: int = 55
     raw: bool = False
+    layout: str = ""                        # wide | strip; "" = strip with one worker, wide with more
 
 
 @dataclass
@@ -79,6 +82,11 @@ class Config:
 
     def worker_cwd(self, w: Worker) -> Path:
         return (self.root / w.cwd).resolve()
+
+    @property
+    def layout(self) -> str:
+        """wide: one dashboard beside the architect. strip: architect | status strip | worker."""
+        return self.dashboard.layout or ("strip" if len(self.workers) == 1 else "wide")
 
 
 # ----------------------------------------------------------------------------- finding the project
@@ -170,6 +178,8 @@ def from_dict(raw: dict, root: Path) -> Config:
     dash = _fill(Dashboard, _table(raw, "dashboard"), "dashboard")
     if not 10 <= dash.split <= 90:
         raise ConfigError(f"dashboard.split must be between 10 and 90, got {dash.split}")
+    if dash.layout and dash.layout not in LAYOUTS:
+        raise ConfigError(f"dashboard.layout must be wide or strip, got {dash.layout!r}")
     workers: list[Worker] = []
     seen: set[str] = set()
     raw_workers = raw.get("workers") or []
@@ -242,15 +252,19 @@ def template(name: str, architect_model: str = "", workers: int = 2, kind: str =
             out += [_kv("permission_mode", '"acceptEdits"', "claude --permission-mode"),
                     _kv("allowed_tools", _q(DEFAULT_ALLOWED), "claude --allowedTools")]
         out += [_kv("cwd", '"."', "relative to the project root"), _kv("timeout", "900", "seconds")]
-    out += ["", "[dashboard]", _kv("split", "55", "percent of the width given to the dashboard pane"),
+    out += ["", "[dashboard]", _kv("layout", _q("strip" if workers == 1 and kind == "codex" else "wide"),
+                                   "wide | strip (architect | status | worker)"),
+            _kv("split", "55", "percent of the width given to the dashboard pane"),
             _kv("raw", "false", "add a pane tailing the newest raw worker log"), ""]
     return "\n".join(out)
 
 
 def ensure_state(root: Path | str) -> Path:
-    """Create .crew/ with a .gitignore that ignores everything in it."""
+    """Create .crew/, private to the user, with a .gitignore that ignores everything in it."""
     d = Path(root) / STATE_DIR
-    d.mkdir(parents=True, exist_ok=True)
+    d.mkdir(mode=0o700, parents=True, exist_ok=True)
+    if d.stat().st_mode & 0o777 != 0o700:
+        d.chmod(0o700)                      # it holds tool output and raw logs
     gi = d / ".gitignore"
     if not gi.exists():
         gi.write_text("*\n")

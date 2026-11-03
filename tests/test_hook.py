@@ -48,6 +48,22 @@ class Hook(unittest.TestCase):
                 ("boss", "status", "waiting for you"),
             ])
 
+    def test_task_notification_is_not_a_prompt(self):
+        wake = ("<task-notification>\n<task-id>bmedfl2mg</task-id>\n<tool-use-id>toolu_01</tool-use-id>\n"
+                "<output-file>/tmp/x/tasks/bmedfl2mg.output</output-file>\n<status>completed</status>\n"
+                '<summary>Background command "Dispatch Codex worker-1 to review the directory" completed '
+                "(exit code 0)</summary>\n</task-notification>")
+        with TempProject() as root:
+            fire(root, {"hook_event_name": "UserPromptSubmit", "prompt": wake}, CLAUDE_PROJECT_DIR=str(root))
+            fire(root, {"hook_event_name": "UserPromptSubmit", "prompt": "<b>real</b> xml from me"},
+                 CLAUDE_PROJECT_DIR=str(root))
+            evs = read_events(Bus(root).events)
+            self.assertEqual([(e["src"], e["kind"], e["text"]) for e in evs], [
+                ("fable", "status", 'woken up: Background command "Dispatch Codex worker-1 to review the directory" '
+                                    "completed (exit code 0)"),
+                ("user", "prompt", "<b>real</b> xml from me"),
+            ])
+
     def test_payload_cwd_walks_up(self):
         with TempProject() as root:
             (root / "crew.toml").write_text("")

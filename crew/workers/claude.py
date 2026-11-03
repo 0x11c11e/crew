@@ -17,11 +17,13 @@ EDIT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 
 def build_command(worker, task: str, resume_id: str | None, result_path: Path | str | None = None,
                   cwd: Path | str | None = None) -> list[str]:
-    # The task stays right after -p: --allowedTools takes a variable number of values.
+    # The task stays right after -p: --allowedTools and --disallowedTools take a variable number of values.
     cmd = ["claude", "-p", task, "--output-format", "stream-json", "--verbose",
            "--permission-mode", worker.permission_mode]
     if worker.allowed_tools.strip():
         cmd += ["--allowedTools", worker.allowed_tools.strip()]
+    if worker.disallowed_tools.strip():
+        cmd += ["--disallowedTools", worker.disallowed_tools.strip()]
     if worker.model:
         cmd += ["--model", worker.model]
     if resume_id:

@@ -55,6 +55,12 @@ class Mapping(unittest.TestCase):
             if ev["type"] == "rate_limit_event" or (ev["type"] == "system" and ev.get("subtype") != "init"):
                 self.assertEqual(claude.map_event(line, ctx), [], line[:80])
         self.assertEqual(claude.map_event("not json", ctx), [])
+        self.assertEqual(claude.map_event('{"type":"rate_limit_event","rate_limit_info":{}}', ctx), [])
+
+    def test_fixture_is_clean(self):
+        for line in LINES:
+            self.assertNotIn("/tmp/", line)
+            self.assertNotIn("rate_limit_event", line)
 
     def test_error_result_and_list_content(self):
         ctx = Ctx()
@@ -93,6 +99,7 @@ class Command(unittest.TestCase):
         cmd = claude.build_command(Worker(name="w", kind="claude"), "t", None)
         self.assertNotIn("--resume", cmd)
         self.assertNotIn("--model", cmd)
+        self.assertNotIn("--disallowedTools", cmd)
 
 
 if __name__ == "__main__":

@@ -38,6 +38,8 @@ class ArchitectMd(unittest.TestCase):
             for w in cfg.workers:
                 self.assertIn(f"{protocol.CMD} run {w.name} --task", md)
             self.assertIn(f'{protocol.CMD} say "Plan: ..."', md)
+            self.assertIn("--read-only", md)
+            self.assertIn("Size the brief to the request", md)
             self.assertIn(f"{protocol.CMD} verify worker-1 pass", md)
             self.assertTrue(md.rstrip().endswith("Run `npm test` before any verdict."))
 

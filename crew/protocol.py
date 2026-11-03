@@ -9,7 +9,7 @@ import json
 import sys
 from pathlib import Path
 
-from .config import Config
+from .config import Config, ensure_state
 
 CMD = "crew"                                              # what the architect types
 ALLOWED_SUBCOMMANDS = ("say", "run", "verify", "post", "status", "tail")
@@ -37,6 +37,7 @@ and human. Workers implement; you plan, dispatch, verify.
 2. Dispatch one worker per task, each in the background (Bash with run_in_background):
 {dispatch}
    Add --continue to keep a worker's thread for a follow-up (it remembers what it did).
+   Add --read-only when the worker must only look and report (a question, a review, a scan).
    Workers can run in parallel when their briefs form a contract.
 3. Wait. You are re-invoked when a worker exits; its output names the result file.
 4. Verify for yourself (run the tests, run the program, read the diff), then post the verdict:
@@ -44,6 +45,11 @@ and human. Workers implement; you plan, dispatch, verify.
 5. Iterate with --continue, or close:  {cmd} say "Done: ..."
 
 ## Rules
+- Size the brief to the request. A question or a look around gets a read-only brief that answers
+  it, not an audit; add no deliverables the user did not ask for. A small question you can answer
+  from one or two files needs no worker at all.
+- A brief is a short markdown note: `# <title>` first (the dashboard shows it on the worker's
+  card), then what to do, what done looks like, and what not to touch.
 - Never implement a task yourself; a one-line fix only after a worker failed twice.
 - Keep your own tokens lean: no reading raw .crew/ logs, no re-reading files you already saw.
 - Say what you are doing in one line before each step.
@@ -102,7 +108,7 @@ def render_settings(cfg: Config | None = None, python: str | None = None) -> dic
 
 def write_all(cfg: Config) -> tuple[Path, Path]:
     """Render both files into .crew/. Cheap, so `crew up` does it every time."""
-    cfg.state.mkdir(parents=True, exist_ok=True)
+    ensure_state(cfg.root)
     md = cfg.state / "ARCHITECT.md"
     md.write_text(render_architect(cfg))
     st = cfg.state / "claude-settings.json"
