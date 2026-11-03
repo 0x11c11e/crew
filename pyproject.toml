@@ -1,0 +1,19 @@
+[build-system]
+requires = ["setuptools>=64"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "crew-agents"
+version = "0.1.0"
+description = "Claude Code as the architect, Codex or Claude headless sessions as workers, and a live dashboard of every message between them."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "Iman Reihanian" }]
+requires-python = ">=3.11"
+dependencies = ["rich"]
+
+[project.scripts]
+crew = "crew.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["crew*"]

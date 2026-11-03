@@ -1,0 +1,5 @@
+#!/usr/bin/env bash
+# Run crew straight from this repository, no install needed.
+REPO="$(cd "$(dirname "$(readlink -f "${BASH_SOURCE[0]}")")/.." && pwd)"
+export PYTHONPATH="$REPO${PYTHONPATH:+:$PYTHONPATH}"
+exec "${CREW_PYTHON:-python3}" -m crew "$@"
